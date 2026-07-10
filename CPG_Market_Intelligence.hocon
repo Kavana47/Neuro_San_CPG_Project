@@ -1,0 +1,463 @@
+
+{
+
+    include "registries/aaosa_basic.hocon",
+    include "config/llm_config.hocon",
+
+
+    
+    metadata {
+    description =
+        """Agent network that helps users find places that sell coffee and place orders.
+        It checks the current time, places orders and remembers user preferences."""
+        sample_queries = [
+        "Where can I get coffee?",
+        "Get me black coffee from Henry's",
+        "My name is Mike",
+        "What time is it?",
+        "Mike here. Get me the same as usual",
+    ]
+    }
+
+    
+   
+    "tools": [
+
+        # ---------------------------------------------------------------
+        # FRONTMAN / PORTFOLIO ORCHESTRATOR
+        # ---------------------------------------------------------------
+        {
+            "name": "cpg_market_intelligence_orchestrator",
+            "function": {
+                "description" : "Entry point for CPG market intelligence requests, single-brand or multi-brand portfolio. Starts by identifying the product/category and country, discovers the top brands present in that market if not already specified, then routes to market trend, customer feedback, and competitive intelligence agents, then to portfolio comparison and reporting.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "product": {
+                            "type": "string",
+                            "description": "The product or category being analyzed, e.g. 'oat milk', 'laundry detergent' ,'Soaps','Toothbrush'.Always required -- this is selected FIRST, before brands."
+                        },
+                        "country": {
+                            "type": "string",
+                            "description": "The country/market to scope brand discovery and trend analysis to. Defaults to 'India' if not specified."
+                        },
+                        "brands": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Optional. Specific brand/product names to analyze. If omitted, brand_discovery_agent is used to find the top brands for 'product' in 'country'."
+                        },
+                        "time_range": {
+                            "type": "string",
+                            "description": "Date range for the analysis, e.g. 'last 12 months'"
+                        }
+                    },
+                    "required": ["product"]
+                }
+            },
+            "instructions": """
+                You are the orchestrator for a consumer packaged goods (CPG) market intelligence system.
+
+                You ALWAYS start by establishing the product/category (e.g. "oat milk", "laundry
+                detergent") before anything else -- this is the "product" field. If the user's request
+                doesn't clearly state a product/category, ask them for it before proceeding; do not
+                guess.
+
+                If "country" is not specified, default to "India" -- do not ask the user to confirm
+                this default, just proceed with it and state you're using it.
+
+            Your specialists:
+            - brand_discovery_agent: given the product and country, finds which brands are present in that
+            space. ALWAYS call this first UNLESS the user already gave you an explicit "brands"
+            list -- in that case skip discovery and use their list directly.
+            - market_trend_analyst: sales/search-interest trends, seasonality, pricing trends
+            - customer_feedback_analyst: review/social sentiment, complaint/praise themes
+            - competitive_intel_agent: competitor launches, promotions, market share
+            - portfolio_comparison_agent: ONLY invoke when there is more than one brand in scope.
+            It ranks and compares brands against each other on trend momentum, sentiment,
+            and share of voice.
+            - reporting_agent: compiles everything into a final structured report
+            
+            
+            Procedure:
+            1. Confirm "product". If missing, ask the user.Default "country" to India if unset.
+            2. Check if the product Comes under Consumer Packaged Goods for Eg. Car,Bikes etc, if not say "Out of Scope for this Project"
+            and provide a list containing CPG examples to choose from.  
+            3. If "brands" was not explicitly given, call brand_discovery_agent with the product and country
+            to get a candidate brand list. Present that candidate list to the user as a starting
+            point (it's a heuristic, not a verified brand registry) -- proceed with it unless the
+            user wants to adjust it.
+            4. Pass the resulting brands list, product,country and time_range to each analysis agent you
+            consult -- they are built to handle either a single brand or a list.
+            5. If exactly 1 brand is in scope: consult the three analysis agents, then go straight
+            to reporting_agent.
+            6. If more than 1 brand is in scope: consult the three analysis agents, THEN
+            portfolio_comparison_agent, THEN reporting_agent with everything (including the
+            comparison)
+            
+            The final output should be from the reporting agent always and consists of the exact output from  reporting_agent.
+            Most Important to note that if timeout error comes provide the output with the simplest data.           
+            Never silently drop a brand from the list -- if data is missing for one,
+            say so explicitly rather than only reporting on the brands that worked.
+
+            Do not include any other tool output in your
+            reply. Do not add extra commentary before or after. End your reply by asking if they
+            want a report for another product or brand set.
+            """ """${aaosa_instructions}""",
+            "tools": [
+                "brand_discovery_agent",
+                "market_trend_analyst",
+                "customer_feedback_analyst",
+                "competitive_intel_agent",
+                "portfolio_comparison_agent",
+                "reporting_agent"
+                ]
+        },
+
+        # ---------------------------------------------------------------
+        # BRAND DISCOVERY
+        # ---------------------------------------------------------------
+        {
+            "name": "brand_discovery_agent",
+            "function": {
+                "description": "Given a product or category and country, finds which brands are present in that space. Called by the orchestrator before any brand-level analysis, unless brands were already explicitly specified.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "product": {
+                            "type": "string",
+                            "description": "The product or category to find brands for, e.g. 'oat milk'"
+                        },
+                        "country": {
+                            "type": "string",
+                            "description": "Country/market to scope discovery to. Defaults to India."
+                        }
+                    },
+                    "required": ["product"]
+                }
+            },
+            "instructions": """
+            You identify which brands exist for a given country for a given product or category. Call
+            get_brand_candidates with the product name and country (default to
+            India if not given)..
+
+            The tool returns "top_brands" -- ranked by relative search interest WITHIN that
+            country, which is a proxy for market presence/consumer attention, NOT a certified,
+            sales-based market-share ranking. Always say so explicitly when presenting results,
+            and mention that a certified ranking would require a syndicated data provider (e.g.
+            Nielsen IQ India, Kantar Worldpanel) which isn't wired into this system.
+
+            Present the top 5 brands clearly (as a simple list) and note that the user can add,
+            remove, or confirm brands before analysis proceeds.
+
+            If the tool errors or returns no candidates, fall back to well-known brands you're
+            confident are sold in that country for this category, from general knowledge, but
+            clearly label that list as "AI-suggested, unverified" rather than presenting it as
+            sourced data.
+            
+            """,
+            "tools": ["get_brand_candidates"]
+        },
+        {
+            "name": "get_brand_candidates",
+            "function": {
+                "description": "Fetches the top N brands (default 5) for a given product/category within a given country, ranked by relative Google Trends search interest as a market-presence proxy.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "product": {"type": "string"},
+                        "country": {
+                            "type": "string",
+                            "description": "Country/market to scope discovery to, e.g. 'India'. Defaults to India."
+                        },
+                        "max_brands": {
+                            "type": "int",
+                            "description": "How many top brands to return. Defaults to 5."
+                            }
+                    },
+                    "required": ["product"]
+                }
+            },
+            "class": "brand_discovery_tool.BrandDiscoveryTool"
+        },
+
+        # ---------------------------------------------------------------
+        # MARKET TREND ANALYST
+        # ---------------------------------------------------------------
+        {
+            "name": "market_trend_analyst",
+            "function": {
+                "description": "Analyzes search/sales interest trends, seasonality, and relative momentum for one or more CPG brands within a given country.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "brands": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "One or more brands/products to analyze"
+                        },
+                        "country": {
+                            "type": "string",
+                            "description": "Country/market to scope the analysis to. Defaults to India."
+                        },
+                        "time_range": {
+                            "type": "string",
+                            "description": "Date range for the analysis, e.g. 'last 12 months'"
+                        }
+                    },
+                    "required": ["brands"]
+                }
+            },
+            "instructions": """
+            You analyze market trends for one or more CPG brands, within a specific country
+            (default India if not given). Call get_sales_data ONCE with the full brands list
+            and country (it returns comparative data for all of them together, which is
+            more meaningful than separate single-brand calls -- Google Trends normalizes interest
+            relative to the other brands in the same request, within that country).
+
+            Identify per brand:
+            - growth or decline trend direction
+            - seasonality patterns
+            - relative interest/momentum vs. the other brands in the request (if more than one)
+
+            Return a concise, data-grounded summary, broken out by brand if multiple were given.
+            Note: Google Trends caps comparisons at 5 terms per request -- if given more than 5
+            brands, tell the user which ones you compared and which were left out.
+            """,
+            "tools": ["get_sales_data"]
+        },
+        {
+            "name": "get_sales_data",
+            "function": {
+                "description": "Fetches comparative search/sales interest data for one or more brands,within a given country, over a time range.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "brands": {
+                            "type": "array",
+                            "items": {"type": "string"}
+                        },
+                        "country": {
+                            "type": "string",
+                            "description": "Country/market to scope the data to, e.g. 'India'. Defaults to India."
+                        },
+                        "time_range": {"type": "string"}
+                    },
+                    "required": ["brands"]
+                }
+            },
+            "class": "sales_data_tool.SalesDataTool"
+        },
+
+        # ---------------------------------------------------------------
+        # CUSTOMER FEEDBACK ANALYST
+        # ---------------------------------------------------------------
+        {
+            "name": "customer_feedback_analyst",
+            "function": {
+                "description": "Analyzes customer reviews and social sentiment for one or more CPG brands.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "brands": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "One or more brands/products to analyze"
+                        },
+                        "sources": {
+                            "type": "string",
+                            "description": "which sources to prioritize, e.g. 'reddit, reviews,Amazon, flipkart etc',Please don't take reviews from Glassdoor or Ambitionbox "
+                        }
+                    },
+                    "required": ["brands"]
+                }
+            },
+            "instructions": """
+            You analyze customer feedback for one or more CPG brands. Call get_feedback_data with
+            the full brands list -- it fetches and tags feedback per brand. Then call
+            score_sentiment with the returned texts_by_brand to get per-brand sentiment
+            proportions.
+
+            Identify, per brand:
+            - overall sentiment split (positive/neutral/negative)
+            - recurring praise themes
+            - recurring complaint themes (packaging, taste, price, availability, etc.)
+
+            If multiple brands were given, also note which brand has the strongest/weakest
+            sentiment and roughly how much online discussion volume each brand has relative
+            to the others (a rough proxy for share of voice).
+
+            Return a concise, theme-based summary, not raw quotes.
+            """,
+            "tools": ["get_feedback_data", "score_sentiment"]
+        },
+        {
+            "name": "get_feedback_data",
+            "function": {
+                "description": "Fetches customer reviews and social mentions for one or more brands, tagged by brand.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "brands": {
+                            "type": "array",
+                            "items": {"type": "string"}
+                        },
+                        "sources": {"type": "string"},
+                        "limit_per_brand": {"type": "int"}
+                    },
+                    "required": ["brands"]
+                }
+            },
+            "class": "feedback_data_tool.FeedbackDataTool"
+        },
+        {
+            "name": "score_sentiment",
+            "function": {
+                "description": "Scores sentiment for feedback text, grouped by brand, and returns per-brand proportions plus a ranking.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "texts_by_brand": {
+                            "type": "object",
+                            "description": "Mapping of brand name -> list of feedback text strings"
+                        }
+                    },
+                    "required": []
+                }
+            },
+            "class": "sentiment_tool.SentimentTool"
+        },
+
+        # ---------------------------------------------------------------
+        # COMPETITIVE INTELLIGENCE
+        # ---------------------------------------------------------------
+        {
+            "name": "competitive_intel_agent",
+            "function": {
+                "description": "Tracks news coverage of launches, promotions, and pricing moves for one or more CPG brands.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "brands": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "One or more brands to track (your own brand plus competitors, or a full competitive set)"
+                        }
+                    },
+                    "required": ["brands"]
+                }
+            },
+            "instructions": """
+            You track competitive activity for one or more CPG brands. Call get_competitor_activity
+            with the full brands list -- it returns recent news per brand.
+
+            Summarize, per brand:
+            - notable new launches or discontinuations
+            - promotional intensity
+            - pricing moves
+            - anything suggesting a market share shift
+
+            If multiple brands were given, call out which brand appears most active in the press
+            right now and any moves that look directly responsive to a competitor's brand in the list.
+            Be explicit about recency and confidence.
+            """,
+            "tools": ["get_competitor_activity"]
+        },
+        {
+            "name": "get_competitor_activity",
+            "function": {
+                "description": "Fetches recent news on launches, promotions, and pricing activity for one or more brands.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "brands": {
+                            "type": "array",
+                            "items": {"type": "string"}
+                        }
+                    },
+                    "required": ["brands"]
+                }
+            },
+            "class": "competitor_data_tool.CompetitorDataTool"
+        },
+
+        
+        # ---------------------------------------------------------------
+        # PORTFOLIO COMPARISON (multi-brand only)
+        # ---------------------------------------------------------------
+        {
+            "name": "portfolio_comparison_agent",
+            "function": {
+                "description": "Compares multiple brands against each other on trend momentum, sentiment, and share of voice. Only used when more than one brand is in scope.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "market_findings": {"type": "string"},
+                        "feedback_findings": {"type": "string"},
+                        "competitive_findings": {"type": "string"}
+                    },
+                    "required": ["market_findings", "feedback_findings", "competitive_findings"]
+                }
+            },
+            "instructions": """
+            You receive per-brand findings from the market trend, customer feedback, and
+            competitive intelligence agents. Produce a cross-brand comparison:
+
+            1. Ranking table (text form): brand, trend direction, sentiment split, relative
+            share of voice, competitive activity level
+            2. Winners/laggards: which brand(s) are gaining ground, which are losing ground,
+            and on what basis
+            3. Notable gaps: any brand with conspicuously thin data, flagged as such rather
+            than guessed at
+
+            Be explicit that rankings are directional (based on search interest and social
+            volume as proxies), not verified market-share figures, unless real POS/market-share
+            data was supplied.
+            """
+        },
+
+        # ---------------------------------------------------------------
+        # REPORTING AGENT
+        # ---------------------------------------------------------------
+        {
+            "name": "reporting_agent",
+            "function": {
+                "description": "Compiles findings (and, for portfolios, the cross-brand comparison) into a structured report.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "market_findings": {"type": "string"},
+                        "feedback_findings": {"type": "string"},
+                        "competitive_findings": {"type": "string"},
+                        "portfolio_comparison": {
+                            "type": "string",
+                            "description": "Output of portfolio_comparison_agent, if multiple brands were analyzed"
+                        }
+                    }
+                }
+            },
+            "instructions": """
+            You compile a structured executive report from the inputs you receive.
+
+            If portfolio_comparison is present (multi-brand request), structure the report as:
+            1. Executive Summary (3-5 bullets, portfolio-level takeaways first)
+            2. Portfolio Comparison (ranking, winners/laggards, gaps)
+            3. Per-Brand Sections (one subsection per brand: trends, feedback, competitive notes)
+            4. Recommended Actions (only if the evidence clearly supports them)
+
+            If portfolio_comparison is absent (single-brand request), structure as:
+            1. Executive Summary
+            2. Market Trends
+            3. Customer Feedback
+            4. Competitive Landscape
+            5. Recommended Actions
+
+            Be concise and specific. Flag any area where the underlying data was thin or the
+            finding is uncertain rather than smoothing over gaps.
+
+            The tool returns a description of data-grounded plain-language summary 
+
+            """,
+            "tools": []
+        }
+    ]
+}
